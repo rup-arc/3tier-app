@@ -1,0 +1,10 @@
+.env
+.env.rds
+.env.*
+!.env.rds.example
+node_modules
+.DS_Store
+*.log
+.terraform/
+.terraform.lock.hcl
+k8s/backend-secret.yaml
