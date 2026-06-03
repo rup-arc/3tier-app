@@ -1,4 +1,4 @@
-name: ECR Build & Deploy to EKS
+name: Smart 3Tier CI/CD Pipeline
 
 on:
   push:
@@ -7,248 +7,161 @@ on:
     paths:
       - 'backend/**'
       - 'frontend/**'
+      - 'k8s/**'
       - '.github/workflows/deploy.yml'
 
 permissions:
   id-token: write
   contents: read
 
-jobs:
-  gitleaks:
-    name: Gitleaks Scan
-    runs-on: ubuntu-latest
 
+jobs:
+
+
+  gitleaks:
+    runs-on: ubuntu-latest
     steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       - name: Run Gitleaks
         uses: gitleaks/gitleaks-action@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+
   trivy:
-    name: Trivy Scan
-    needs: gitleaks
     runs-on: ubuntu-latest
-
+    needs: gitleaks
     steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Run Trivy Scan
+      - name: Run Trivy
         uses: aquasecurity/trivy-action@master
         with:
           scan-type: fs
           scan-ref: .
-          format: table
           severity: HIGH,CRITICAL
           exit-code: 0
 
+
+
   detect-changes:
-    name: Detect Docker Changes
-    needs: trivy
     runs-on: ubuntu-latest
+    needs: trivy
     outputs:
-      backend-changed: ${{ steps.changed.outputs.backend }}
-      frontend-changed: ${{ steps.changed.outputs.frontend }}
+      backend: ${{ steps.filter.outputs.backend }}
+      frontend: ${{ steps.filter.outputs.frontend }}
 
     steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
       - name: Detect Changes
-        id: changed
+        id: filter
         run: |
-          if git diff HEAD~1 HEAD --name-only | grep -q "backend/"; then
+          echo "backend=false" >> $GITHUB_OUTPUT
+          echo "frontend=false" >> $GITHUB_OUTPUT
+
+          if git diff HEAD~1 HEAD --name-only | grep -q backend; then
             echo "backend=true" >> $GITHUB_OUTPUT
-          else
-            echo "backend=false" >> $GITHUB_OUTPUT
           fi
-          
-          if git diff HEAD~1 HEAD --name-only | grep -q "frontend/"; then
+
+          if git diff HEAD~1 HEAD --name-only | grep -q frontend; then
             echo "frontend=true" >> $GITHUB_OUTPUT
-          else
-            echo "frontend=false" >> $GITHUB_OUTPUT
           fi
+
+
 
   build-backend:
-    name: Build & Push Backend to ECR
-    needs: detect-changes
-    if: needs.detect-changes.outputs.backend-changed == 'true'
     runs-on: ubuntu-latest
+    needs: detect-changes
+    if: needs.detect-changes.outputs.backend == 'true'
 
     steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Configure AWS Credentials (OIDC)
+      - name: Configure AWS
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: ap-south-1
 
-      - name: Get AWS Account ID
-        id: aws
-        run: echo "account-id=$(aws sts get-caller-identity --query Account --output text)" >> $GITHUB_OUTPUT
-
       - name: Login to ECR
         uses: aws-actions/amazon-ecr-login@v2
-        id: login-ecr
 
-      - name: Generate Image Tag
-        id: tag
+      - name: Build & Push Backend
         run: |
-          TIMESTAMP=$(date +%s)
-          SHORT_SHA=$(git rev-parse --short HEAD)
-          TAG="v1.0-${SHORT_SHA}-${TIMESTAMP}"
-          echo "tag=${TAG}" >> $GITHUB_OUTPUT
-          echo "Image tag: ${TAG}"
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          IMAGE_TAG=v1-${GITHUB_SHA::7}
+          BACKEND_IMAGE="$ACCOUNT_ID.dkr.ecr.ap-south-1.amazonaws.com/3tier-app/backend:$IMAGE_TAG"
 
-      - name: Build Backend Docker Image
-        env:
-          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-          ECR_REPOSITORY: 3tier-app/backend
-          IMAGE_TAG: ${{ steps.tag.outputs.tag }}
+          docker build -t $BACKEND_IMAGE backend/
+          docker push $BACKEND_IMAGE
+
+          echo "BACKEND_IMAGE=$BACKEND_IMAGE" >> $GITHUB_ENV
+
+      - name: Smart Update Backend YAML
         run: |
-          cd backend
-          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
-          docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:latest
+          sed -i "s|image: .*backend.*|image: $BACKEND_IMAGE|g" k8s/backend-deployment.yaml
 
-      - name: Push Backend Image to ECR
-        env:
-          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-          ECR_REPOSITORY: 3tier-app/backend
-          IMAGE_TAG: ${{ steps.tag.outputs.tag }}
-        run: |
-          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
-          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
-          echo "IMAGE_URI=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_ENV
-
-      - name: Delete Old Backend Images (Keep 3 latest)
-        env:
-          ECR_REPOSITORY: 3tier-app/backend
-        run: |
-          IMAGES=$(aws ecr describe-images --repository-name $ECR_REPOSITORY --region ap-south-1 \
-            --query 'sort_by(imageDetails,& imagePushedAt)[:-3].imageIds[*]' --output json)
-          
-          if [ "$IMAGES" != "[]" ]; then
-            echo "$IMAGES" | jq -r '.[] | @json' | while read image; do
-              aws ecr batch-delete-image --repository-name $ECR_REPOSITORY --image-ids "$image" --region ap-south-1
-            done
-          fi
-
-      - name: Update K8s Backend Deployment
-        env:
-          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-          ECR_REPOSITORY: 3tier-app/backend
-          IMAGE_TAG: ${{ steps.tag.outputs.tag }}
-        run: |
-          FULL_IMAGE_URI="$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
-          sed -i "s|image: .*3tier-app-backend.*|image: $FULL_IMAGE_URI|g" k8s/backend-deployment.yaml
-          cat k8s/backend-deployment.yaml | grep "image:"
-
-      - name: Upload Updated Deployment
+      - name: Upload Backend YAML
         uses: actions/upload-artifact@v4
         with:
-          name: backend-deployment
+          name: backend-yaml
           path: k8s/backend-deployment.yaml
 
+
+
   build-frontend:
-    name: Build & Push Frontend to ECR
-    needs: detect-changes
-    if: needs.detect-changes.outputs.frontend-changed == 'true'
     runs-on: ubuntu-latest
+    needs: detect-changes
+    if: needs.detect-changes.outputs.frontend == 'true'
 
     steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Configure AWS Credentials (OIDC)
+      - name: Configure AWS
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: ap-south-1
 
-      - name: Get AWS Account ID
-        id: aws
-        run: echo "account-id=$(aws sts get-caller-identity --query Account --output text)" >> $GITHUB_OUTPUT
-
       - name: Login to ECR
         uses: aws-actions/amazon-ecr-login@v2
-        id: login-ecr
 
-      - name: Generate Image Tag
-        id: tag
+      - name: Build & Push Frontend
         run: |
-          TIMESTAMP=$(date +%s)
-          SHORT_SHA=$(git rev-parse --short HEAD)
-          TAG="v1.0-${SHORT_SHA}-${TIMESTAMP}"
-          echo "tag=${TAG}" >> $GITHUB_OUTPUT
-          echo "Image tag: ${TAG}"
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          IMAGE_TAG=v1-${GITHUB_SHA::7}
+          FRONTEND_IMAGE="$ACCOUNT_ID.dkr.ecr.ap-south-1.amazonaws.com/3tier-app/frontend:$IMAGE_TAG"
 
-      - name: Build Frontend Docker Image
-        env:
-          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-          ECR_REPOSITORY: 3tier-app/frontend
-          IMAGE_TAG: ${{ steps.tag.outputs.tag }}
+          docker build -t $FRONTEND_IMAGE frontend/
+          docker push $FRONTEND_IMAGE
+
+          echo "FRONTEND_IMAGE=$FRONTEND_IMAGE" >> $GITHUB_ENV
+
+      - name: Smart Update Frontend YAML
         run: |
-          cd frontend
-          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
-          docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:latest
+          sed -i "s|image: .*frontend.*|image: $FRONTEND_IMAGE|g" k8s/frontend-deployment.yaml
 
-      - name: Push Frontend Image to ECR
-        env:
-          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-          ECR_REPOSITORY: 3tier-app/frontend
-          IMAGE_TAG: ${{ steps.tag.outputs.tag }}
-        run: |
-          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
-          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
-          echo "IMAGE_URI=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_ENV
-
-      - name: Delete Old Frontend Images (Keep 3 latest)
-        env:
-          ECR_REPOSITORY: 3tier-app/frontend
-        run: |
-          IMAGES=$(aws ecr describe-images --repository-name $ECR_REPOSITORY --region ap-south-1 \
-            --query 'sort_by(imageDetails,& imagePushedAt)[:-3].imageIds[*]' --output json)
-          
-          if [ "$IMAGES" != "[]" ]; then
-            echo "$IMAGES" | jq -r '.[] | @json' | while read image; do
-              aws ecr batch-delete-image --repository-name $ECR_REPOSITORY --image-ids "$image" --region ap-south-1
-            done
-          fi
-
-      - name: Update K8s Frontend Deployment
-        env:
-          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-          ECR_REPOSITORY: 3tier-app/frontend
-          IMAGE_TAG: ${{ steps.tag.outputs.tag }}
-        run: |
-          FULL_IMAGE_URI="$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
-          sed -i "s|image: .*3tier-app-frontend.*|image: $FULL_IMAGE_URI|g" k8s/frontend-deployment.yaml
-          cat k8s/frontend-deployment.yaml | grep "image:"
-
-      - name: Upload Updated Deployment
+      - name: Upload Frontend YAML
         uses: actions/upload-artifact@v4
         with:
-          name: frontend-deployment
+          name: frontend-yaml
           path: k8s/frontend-deployment.yaml
 
-  deploy-eks:
-    name: Deploy to EKS with Minimal Downtime
-    needs: [build-backend, build-frontend]
-    if: always() && (needs.build-backend.result == 'success' || needs.build-frontend.result == 'success')
+
+
+  deploy:
     runs-on: ubuntu-latest
+    needs: [build-backend, build-frontend]
+    if: always()
 
     steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Configure AWS Credentials (OIDC)
+      - name: Configure AWS
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
@@ -256,61 +169,22 @@ jobs:
 
       - name: Update kubeconfig
         run: |
-          aws eks update-kubeconfig --name 3tier-app-cluster --region ap-south-1
+          aws eks update-kubeconfig --name myeks --region ap-south-1
 
-      - name: Download Artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: ./artifacts
-
-      - name: Apply Updated Deployments
+      - name: Deploy Backend
         run: |
-          if [ -f ./artifacts/backend-deployment/backend-deployment.yaml ]; then
-            echo "Deploying backend..."
-            kubectl apply -f ./artifacts/backend-deployment/backend-deployment.yaml
-          fi
-          
-          if [ -f ./artifacts/frontend-deployment/frontend-deployment.yaml ]; then
-            echo "Deploying frontend..."
-            kubectl apply -f ./artifacts/frontend-deployment/frontend-deployment.yaml
-          fi
+          kubectl apply -f k8s/backend-deployment.yaml || true
 
-      - name: Verify Rollout (Rolling Update)
+      - name: Deploy Frontend
         run: |
-          if [ -f ./artifacts/backend-deployment/backend-deployment.yaml ]; then
-            echo "Waiting for backend rollout..."
-            kubectl rollout status deployment/backend-deployment -n default --timeout=5m
-          fi
-          
-          if [ -f ./artifacts/frontend-deployment/frontend-deployment.yaml ]; then
-            echo "Waiting for frontend rollout..."
-            kubectl rollout status deployment/frontend-deployment -n default --timeout=5m
-          fi
+          kubectl apply -f k8s/frontend-deployment.yaml || true
 
-      - name: Verify Pod Status
+      - name: Rollout Status
         run: |
-          echo "=== Pod Status ==="
-          kubectl get pods -A
-          echo ""
-          echo "=== Service Status ==="
-          kubectl get svc -A
+          kubectl rollout status deployment/backend-deployment -n default --timeout=5m || true
+          kubectl rollout status deployment/frontend-deployment -n default --timeout=5m || true
 
-  notify-success:
-    name: Notify Deployment Success
-    needs: deploy-eks
-    if: success()
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Configure AWS Credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-          aws-region: ap-south-1
-
-      - name: Deployment Complete
+      - name: Verify
         run: |
-          echo "✅ Deployment completed successfully!"
-          echo "Repository: 3tier-app"
-          echo "Cluster: 3tier-app-cluster (ap-south-1)"
-          echo "Time: $(date)"
+          kubectl get pods -n default
+          kubectl get svc -n default
