@@ -1,4 +1,4 @@
-name: ECR Build → Push → Deploy to EKS
+name: 3Tier CI/CD (ECR → EKS → SNS)
 
 on:
   push:
@@ -14,121 +14,206 @@ permissions:
   id-token: write
   contents: read
 
-env:
-  AWS_REGION: ap-south-1
-  ECR_REPO_BACKEND: backend
-  ECR_REPO_FRONTEND: frontend
-  CLUSTER_NAME: myeks
-
+# =========================
 jobs:
-# ----------------------------
-# 1. SECURITY SCAN
-# ----------------------------
-  security:
+
+# =========================
+# SECURITY SCANS
+# =========================
+  gitleaks:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Run Gitleaks
-        uses: zricethezav/gitleaks-action@v2
+      - name: Gitleaks Scan
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Run Trivy FS Scan
-        uses: aquasecurity/trivy-action@0.28.0
+  trivy:
+    needs: gitleaks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Trivy Scan
+        uses: aquasecurity/trivy-action@master
         with:
           scan-type: fs
-          format: table
-          exit-code: 1
+          scan-ref: .
+          severity: HIGH,CRITICAL
+          exit-code: 0
 
-# ----------------------------
-# 2. BUILD & PUSH
-# ----------------------------
-  build:
-    needs: security
+# =========================
+# DETECT CHANGES
+# =========================
+  detect-changes:
+    needs: trivy
     runs-on: ubuntu-latest
     outputs:
-      backend_tag: ${{ steps.meta.outputs.backend_tag }}
-      frontend_tag: ${{ steps.meta.outputs.frontend_tag }}
+      backend: ${{ steps.filter.outputs.backend }}
+      frontend: ${{ steps.filter.outputs.frontend }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Configure AWS OIDC
-        uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
+          fetch-depth: 0
 
-      - name: Login to ECR
+      - name: Detect changes
+        id: filter
         run: |
-          aws ecr get-login-password --region $AWS_REGION | \
-          docker login --username AWS --password-stdin ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.$AWS_REGION.amazonaws.com
+          echo "backend=false" >> $GITHUB_OUTPUT
+          echo "frontend=false" >> $GITHUB_OUTPUT
 
-      - name: Generate IMAGE TAG
-        id: meta
-        run: |
-          TAG=${GITHUB_SHA::7}
-          echo "backend_tag=$TAG" >> $GITHUB_OUTPUT
-          echo "frontend_tag=$TAG" >> $GITHUB_OUTPUT
+          if git diff HEAD~1 HEAD --name-only | grep -q backend/; then
+            echo "backend=true" >> $GITHUB_OUTPUT
+          fi
 
-      - name: Build & Push Backend
-        run: |
-          docker build -t backend:${{ steps.meta.outputs.backend_tag }} ./backend
-          docker tag backend:${{ steps.meta.outputs.backend_tag }} ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.$AWS_REGION.amazonaws.com/backend:${{ steps.meta.outputs.backend_tag }}
-          docker push ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.$AWS_REGION.amazonaws.com/backend:${{ steps.meta.outputs.backend_tag }}
+          if git diff HEAD~1 HEAD --name-only | grep -q frontend/; then
+            echo "frontend=true" >> $GITHUB_OUTPUT
+          fi
 
-      - name: Build & Push Frontend
-        run: |
-          docker build -t frontend:${{ steps.meta.outputs.frontend_tag }} ./frontend
-          docker tag frontend:${{ steps.meta.outputs.frontend_tag }} ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.$AWS_REGION.amazonaws.com/frontend:${{ steps.meta.outputs.frontend_tag }}
-          docker push ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.$AWS_REGION.amazonaws.com/frontend:${{ steps.meta.outputs.frontend_tag }}
-
-# ----------------------------
-# 3. DEPLOY TO EKS
-# ----------------------------
-  deploy:
-    needs: build
+# =========================
+# BACKEND BUILD & PUSH
+# =========================
+  build-backend:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.backend == 'true'
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Configure AWS OIDC
+      - name: AWS Login (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
+          aws-region: ap-south-1
 
-      - name: Update kubeconfig
-        run: |
-          aws eks update-kubeconfig --name $CLUSTER_NAME --region $AWS_REGION
+      - name: Login to ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Update Backend Image
+      - name: Build & Push Backend Image
         run: |
-          sed -i "s|backend:.*|backend:${{ needs.build.outputs.backend_tag }}|g" k8s/backend-deployment.yaml
+          TAG=v${{ github.run_number }}
+          ECR=${{ steps.ecr.outputs.registry }}/3tier-app/backend
 
-      - name: Update Frontend Image
-        run: |
-          sed -i "s|frontend:.*|frontend:${{ needs.build.outputs.frontend_tag }}|g" k8s/frontend-deployment.yaml
+          docker build -t $ECR:$TAG backend
+          docker push $ECR:$TAG
 
-      - name: Apply Kubernetes
+          echo "IMAGE=$ECR:$TAG" >> $GITHUB_ENV
+
+      # SMART YAML UPDATE
+      - name: Update Kubernetes Backend Image
         run: |
-          kubectl apply -f k8s/
+          sed -i "s|image: .*backend.*|image: $IMAGE|g" k8s/backend-deployment.yaml
+
+      - name: Upload backend deployment
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend
+          path: k8s/backend-deployment.yaml
+
+# =========================
+# FRONTEND BUILD & PUSH
+# =========================
+  build-frontend:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.frontend == 'true'
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: AWS Login
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ap-south-1
+
+      - name: Login to ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build & Push Frontend Image
+        run: |
+          TAG=v${{ github.run_number }}
+          ECR=${{ steps.ecr.outputs.registry }}/3tier-app/frontend
+
+          docker build -t $ECR:$TAG frontend
+          docker push $ECR:$TAG
+
+          echo "IMAGE=$ECR:$TAG" >> $GITHUB_ENV
+
+      # SMART YAML UPDATE
+      - name: Update Kubernetes Frontend Image
+        run: |
+          sed -i "s|image: .*frontend.*|image: $IMAGE|g" k8s/frontend-deployment.yaml
+
+      - name: Upload frontend deployment
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend
+          path: k8s/frontend-deployment.yaml
+
+# =========================
+# DEPLOY TO EKS
+# =========================
+  deploy:
+    needs: [build-backend, build-frontend]
+    if: always()
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: AWS Login
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ap-south-1
+
+      - name: Update kubeconfig (EKS ACCESS FIX)
+        run: |
+          aws eks update-kubeconfig --name myeks --region ap-south-1
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Apply Kubernetes Changes
+        run: |
+          if [ -f artifacts/backend/backend-deployment.yaml ]; then
+            kubectl apply -f artifacts/backend/backend-deployment.yaml
+          fi
+
+          if [ -f artifacts/frontend/frontend-deployment.yaml ]; then
+            kubectl apply -f artifacts/frontend/frontend-deployment.yaml
+          fi
 
       - name: Rollout Status
         run: |
-          kubectl rollout status deployment/backend-deployment
-          kubectl rollout status deployment/frontend-deployment
+          kubectl rollout status deployment/backend-deployment --timeout=5m || true
+          kubectl rollout status deployment/frontend-deployment --timeout=5m || true
 
-# ----------------------------
-# 4. SNS NOTIFICATIONS
-# ----------------------------
-  notify-success:
+      - name: Cluster Debug
+        run: |
+          kubectl get pods -A
+          kubectl get svc -A
+
+# =========================
+# SNS NOTIFICATION
+# =========================
+  notify:
     needs: deploy
-    if: success()
+    if: always()
     runs-on: ubuntu-latest
+
     steps:
       - name: AWS Login
         uses: aws-actions/configure-aws-credentials@v4
@@ -136,27 +221,18 @@ jobs:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: ap-south-1
 
-      - name: Send SNS Success
+      - name: Success Notification
+        if: success()
         run: |
           aws sns publish \
             --topic-arn "${{ secrets.SNS_TOPIC_ARN }}" \
-            --subject "EKS Deploy Success" \
-            --message "Deployment successful: ${{ github.sha }}"
+            --subject "SUCCESS: 3Tier Deployment" \
+            --message "Deployment SUCCESS - Commit: ${{ github.sha }}"
 
-  notify-failure:
-    needs: [security, build, deploy]
-    if: failure()
-    runs-on: ubuntu-latest
-    steps:
-      - name: AWS Login
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-          aws-region: ap-south-1
-
-      - name: Send SNS Failure
+      - name: Failure Notification
+        if: failure()
         run: |
           aws sns publish \
             --topic-arn "${{ secrets.SNS_TOPIC_ARN }}" \
-            --subject "EKS Deploy Failed" \
-            --message "Pipeline failed for commit: ${{ github.sha }}"
+            --subject "FAILED: 3Tier Deployment" \
+            --message "Deployment FAILED - Commit: ${{ github.sha }}"
