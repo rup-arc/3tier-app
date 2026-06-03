@@ -2,7 +2,11 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: backend-config
+
 data:
-  DB_SSL: "true"
+  DB_HOST: postgres-3tier-app.c6trbbvkk8oj.ap-south-1.rds.amazonaws.com
   DB_PORT: "5432"
+  DB_NAME: appdb
+  DB_USER: postgres
+  DB_SSL: "true"
   CORS_ORIGIN: "*"

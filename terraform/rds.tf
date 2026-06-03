@@ -2,7 +2,7 @@
 # DB SUBNET GROUP
 # -----------------------------
 resource "aws_db_subnet_group" "db" {
-  name       = "${var.project}-db-subnet-group"
+  name       = "db-subnet-group-rupam"
   subnet_ids = module.vpc.private_subnets
 
   tags = {

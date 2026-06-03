@@ -11,12 +11,11 @@ module "eks" {
   cluster_endpoint_public_access  = true
   cluster_endpoint_private_access = false
 
-  # -------------------------
-  # NODE GROUP (STABLE CONFIG)
-  # -------------------------
   eks_managed_node_groups = {
     default = {
       instance_types = ["t3.medium"]
+
+      ami_type = "AL2023_x86_64_STANDARD"
 
       min_size     = 1
       max_size     = 3
@@ -28,28 +27,19 @@ module "eks" {
     }
   }
 
-  # -------------------------
-  # ADDONS
-  # -------------------------
   cluster_addons = {
-    vpc-cni            = { most_recent = true }
-    coredns            = { most_recent = true }
-    kube-proxy         = { most_recent = true }
+    vpc-cni = { most_recent = true }
+    coredns = { most_recent = true }
+    kube-proxy = { most_recent = true }
     aws-ebs-csi-driver = { most_recent = true }
   }
 
-  # -------------------------
-  # LOGGING (OPTIONAL BUT GOOD)
-  # -------------------------
   cluster_enabled_log_types = [
     "api",
     "audit",
     "authenticator"
   ]
 
-  # -------------------------
-  # IRSA (REQUIRED FOR ALB)
-  # -------------------------
   enable_irsa = true
 
   tags = {

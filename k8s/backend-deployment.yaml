@@ -17,22 +17,31 @@ spec:
       containers:
         - name: backend
           image: 585853585762.dkr.ecr.ap-south-1.amazonaws.com/3tier-app/backend:v1.0
+          imagePullPolicy: Always
+
           ports:
             - containerPort: 8080
+
           envFrom:
             - configMapRef:
                 name: backend-config
             - secretRef:
                 name: backend-secret
+
           readinessProbe:
             httpGet:
               path: /api/tutorials
               port: 8080
-            initialDelaySeconds: 10
-            periodSeconds: 10
+            initialDelaySeconds: 60
+            periodSeconds: 20
+            timeoutSeconds: 10
+            failureThreshold: 5
+
           livenessProbe:
             httpGet:
               path: /api/tutorials
               port: 8080
-            initialDelaySeconds: 30
+            initialDelaySeconds: 120
             periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 5
