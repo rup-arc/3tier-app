@@ -3,12 +3,12 @@ kind: Ingress
 metadata:
   name: 3tier-app-ingress
   annotations:
-    kubernetes.io/ingress.class: alb
     alb.ingress.kubernetes.io/scheme: internet-facing
     alb.ingress.kubernetes.io/target-type: ip
     alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}]'
     alb.ingress.kubernetes.io/healthcheck-path: /
 spec:
+  ingressClassName: alb
   rules:
     - http:
         paths:
@@ -19,6 +19,7 @@ spec:
                 name: backend
                 port:
                   number: 8080
+
           - path: /
             pathType: Prefix
             backend:
