@@ -60,7 +60,7 @@ jobs:
       - name: Invalidate CloudFront Cache
         run: |
           aws cloudfront create-invalidation \
-            --distribution-id ${{ secrets.CLOUDFRONT_DISTRIBUTION_ID }} \
+            --distribution-id "${{ secrets.CLOUDFRONT_DISTRIBUTION_ID }}" \
             --paths "/*"
 
   notify-success:
@@ -90,7 +90,7 @@ jobs:
             },
             {
               "activityTitle": "Application URL",
-              "text": "${{ secrets.CLOUDFRONT_URL }}",
+              "text": "${{ vars.CLOUDFRONT_URL }}",
               "markdown": true
             },
             {
