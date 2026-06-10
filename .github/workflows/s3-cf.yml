@@ -1,4 +1,4 @@
-name: Deploy S3 CloudFront
+name: Deploy Static Website to S3 and CloudFront
 
 on:
   push:
@@ -14,10 +14,11 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
+      - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Setup Node
+      # Remove these Node steps if your project is plain HTML/CSS/JS
+      - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 20
@@ -28,10 +29,10 @@ jobs:
       - name: Build Application
         run: npm run build
 
-      - name: Upload Artifact
+      - name: Upload Build Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: build-files
+          name: website-build
           path: dist
 
   deploy:
@@ -39,13 +40,13 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Download Artifact
+      - name: Download Build Artifact
         uses: actions/download-artifact@v4
         with:
-          name: build-files
+          name: website-build
           path: dist
 
-      - name: Configure AWS Credentials
+      - name: Configure AWS Credentials using OIDC
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
@@ -53,13 +54,13 @@ jobs:
 
       - name: Deploy to S3
         run: |
-          aws s3 sync dist s3://${{ secrets.S3_BUCKET }} --delete
+          aws s3 sync dist/ s3://${{ vars.S3_BUCKET }} --delete
 
-      - name: CloudFront Invalidation
+      - name: Invalidate CloudFront Cache
         run: |
           aws cloudfront create-invalidation \
-          --distribution-id ${{ secrets.CLOUDFRONT_DISTRIBUTION_ID }} \
-          --paths "/*"
+            --distribution-id ${{ vars.CLOUDFRONT_DISTRIBUTION_ID }} \
+            --paths "/*"
 
   notify-success:
     needs: deploy
@@ -73,25 +74,37 @@ jobs:
           "@type": "MessageCard",
           "@context": "https://schema.org/extensions",
           "themeColor": "00FF00",
-          "summary": "S3 CloudFront Deployment Success",
+          "summary": "Deployment Success",
           "sections": [
             {
-              "activityTitle": "✅ Deployment Successful",
+              "activityTitle": "✅ S3 + CloudFront Deployment Successful",
               "facts": [
-                { "name": "Repository", "value": "${{ github.repository }}" },
-                { "name": "Branch", "value": "${{ github.ref_name }}" },
-                { "name": "Environment", "value": "Production" },
-                { "name": "Triggered By", "value": "${{ github.actor }}" },
-                { "name": "Commit", "value": "${{ github.sha }}" }
+                {
+                  "name": "Repository",
+                  "value": "${{ github.repository }}"
+                },
+                {
+                  "name": "Branch",
+                  "value": "${{ github.ref_name }}"
+                },
+                {
+                  "name": "Environment",
+                  "value": "Production"
+                },
+                {
+                  "name": "Triggered By",
+                  "value": "${{ github.actor }}"
+                },
+                {
+                  "name": "Commit",
+                  "value": "${{ github.sha }}"
+                }
               ],
               "markdown": true
             },
             {
-              "activityTitle": "Deployment Details",
-              "facts": [
-                { "name": "Target", "value": "AWS S3 + CloudFront" },
-                { "name": "Distribution", "value": "${{ secrets.CLOUDFRONT_DISTRIBUTION_ID }}" }
-              ],
+              "activityTitle": "Deployment Target",
+              "text": "AWS S3 + CloudFront",
               "markdown": true
             }
           ]
@@ -112,23 +125,34 @@ jobs:
           "@type": "MessageCard",
           "@context": "https://schema.org/extensions",
           "themeColor": "FF0000",
-          "summary": "S3 CloudFront Deployment Failed",
+          "summary": "Deployment Failed",
           "title": "❌ Deployment Failed",
           "sections": [
             {
-              "activityTitle": "Deployment failed",
+              "activityTitle": "S3 + CloudFront Deployment Failed",
               "facts": [
-                { "name": "Repository", "value": "${{ github.repository }}" },
-                { "name": "Branch", "value": "${{ github.ref_name }}" },
-                { "name": "Environment", "value": "Production" },
-                { "name": "Triggered By", "value": "${{ github.actor }}" },
-                { "name": "Commit", "value": "${{ github.sha }}" }
+                {
+                  "name": "Repository",
+                  "value": "${{ github.repository }}"
+                },
+                {
+                  "name": "Branch",
+                  "value": "${{ github.ref_name }}"
+                },
+                {
+                  "name": "Triggered By",
+                  "value": "${{ github.actor }}"
+                },
+                {
+                  "name": "Commit",
+                  "value": "${{ github.sha }}"
+                }
               ],
               "markdown": true
             },
             {
-              "activityTitle": "Workflow Link",
-              "text": "[Open GitHub Actions Run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})",
+              "activityTitle": "Workflow Run",
+              "text": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}",
               "markdown": true
             }
           ]
