@@ -1,4 +1,4 @@
-name: Deploy Static Website to S3 and CloudFront
+name: Deploy Frontend to S3 and CloudFront
 
 on:
   push:
@@ -17,23 +17,24 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      # Remove these Node steps if your project is plain HTML/CSS/JS
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 20
 
       - name: Install Dependencies
+        working-directory: frontend
         run: npm ci
 
-      - name: Build Application
+      - name: Build React Application
+        working-directory: frontend
         run: npm run build
 
       - name: Upload Build Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: website-build
-          path: dist
+          name: frontend-build
+          path: frontend/build
 
   deploy:
     needs: build
@@ -43,10 +44,10 @@ jobs:
       - name: Download Build Artifact
         uses: actions/download-artifact@v4
         with:
-          name: website-build
-          path: dist
+          name: frontend-build
+          path: build
 
-      - name: Configure AWS Credentials using OIDC
+      - name: Configure AWS Credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
@@ -54,7 +55,7 @@ jobs:
 
       - name: Deploy to S3
         run: |
-          aws s3 sync dist/ s3://${{ vars.S3_BUCKET }} --delete
+          aws s3 sync build/ s3://${{ vars.S3_BUCKET }} --delete
 
       - name: Invalidate CloudFront Cache
         run: |
@@ -64,7 +65,7 @@ jobs:
 
   notify-success:
     needs: deploy
-    if: ${{ always() && needs.deploy.result == 'success' }}
+    if: ${{ success() }}
 
     uses: ./.github/workflows/reusable-teams-notification-workflow.yml
 
@@ -101,11 +102,6 @@ jobs:
                 }
               ],
               "markdown": true
-            },
-            {
-              "activityTitle": "Deployment Target",
-              "text": "AWS S3 + CloudFront",
-              "markdown": true
             }
           ]
         }
@@ -115,7 +111,7 @@ jobs:
 
   notify-failure:
     needs: deploy
-    if: ${{ always() && needs.deploy.result == 'failure' }}
+    if: ${{ failure() }}
 
     uses: ./.github/workflows/reusable-teams-notification-workflow.yml
 
@@ -129,7 +125,7 @@ jobs:
           "title": "❌ Deployment Failed",
           "sections": [
             {
-              "activityTitle": "S3 + CloudFront Deployment Failed",
+              "activityTitle": "Deployment Failed",
               "facts": [
                 {
                   "name": "Repository",
@@ -152,11 +148,11 @@ jobs:
             },
             {
               "activityTitle": "Workflow Run",
-              "text": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}",
-              "markdown": true
+              "text": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
             }
           ]
         }
 
     secrets:
       TEAMS_WEBHOOK_URL: ${{ secrets.TEAMS_WEBHOOK_URL }}
+      
