@@ -26,7 +26,7 @@ jobs:
         working-directory: frontend
         run: npm ci
 
-      - name: Build React Application
+      - name: Build Frontend
         working-directory: frontend
         run: npm run build
 
@@ -47,11 +47,11 @@ jobs:
           name: frontend-build
           path: build
 
-      - name: Configure AWS Credentials (OIDC)
+      - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-          aws-region: us-east-1
+          aws-region: ${{ secrets.AWS_REGION }}
 
       - name: Deploy to S3
         run: |
@@ -65,7 +65,7 @@ jobs:
 
   notify-success:
     needs: deploy
-    if: ${{ success() }}
+    if: ${{ needs.deploy.result == 'success' }}
 
     uses: ./.github/workflows/reusable-teams-notification-workflow.yml
 
@@ -78,29 +78,24 @@ jobs:
           "summary": "Deployment Success",
           "sections": [
             {
-              "activityTitle": "✅ S3 + CloudFront Deployment Successful",
+              "activityTitle": "✅ Deployment Successful",
               "facts": [
-                {
-                  "name": "Repository",
-                  "value": "${{ github.repository }}"
-                },
-                {
-                  "name": "Branch",
-                  "value": "${{ github.ref_name }}"
-                },
-                {
-                  "name": "Environment",
-                  "value": "Production"
-                },
-                {
-                  "name": "Triggered By",
-                  "value": "${{ github.actor }}"
-                },
-                {
-                  "name": "Commit",
-                  "value": "${{ github.sha }}"
-                }
+                { "name": "Repository", "value": "${{ github.repository }}" },
+                { "name": "Branch", "value": "${{ github.ref_name }}" },
+                { "name": "Environment", "value": "Production" },
+                { "name": "Triggered By", "value": "${{ github.actor }}" },
+                { "name": "Commit", "value": "${{ github.sha }}" }
               ],
+              "markdown": true
+            },
+            {
+              "activityTitle": "Application URL",
+              "text": "${{ secrets.CLOUDFRONT_URL }}",
+              "markdown": true
+            },
+            {
+              "activityTitle": "Workflow Run",
+              "text": "[Open Workflow Run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})",
               "markdown": true
             }
           ]
@@ -111,7 +106,7 @@ jobs:
 
   notify-failure:
     needs: deploy
-    if: ${{ failure() }}
+    if: ${{ needs.deploy.result == 'failure' }}
 
     uses: ./.github/workflows/reusable-teams-notification-workflow.yml
 
@@ -127,32 +122,21 @@ jobs:
             {
               "activityTitle": "Deployment Failed",
               "facts": [
-                {
-                  "name": "Repository",
-                  "value": "${{ github.repository }}"
-                },
-                {
-                  "name": "Branch",
-                  "value": "${{ github.ref_name }}"
-                },
-                {
-                  "name": "Triggered By",
-                  "value": "${{ github.actor }}"
-                },
-                {
-                  "name": "Commit",
-                  "value": "${{ github.sha }}"
-                }
+                { "name": "Repository", "value": "${{ github.repository }}" },
+                { "name": "Branch", "value": "${{ github.ref_name }}" },
+                { "name": "Environment", "value": "Production" },
+                { "name": "Triggered By", "value": "${{ github.actor }}" },
+                { "name": "Commit", "value": "${{ github.sha }}" }
               ],
               "markdown": true
             },
             {
               "activityTitle": "Workflow Run",
-              "text": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+              "text": "[Open Workflow Run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})",
+              "markdown": true
             }
           ]
         }
 
     secrets:
       TEAMS_WEBHOOK_URL: ${{ secrets.TEAMS_WEBHOOK_URL }}
-      
