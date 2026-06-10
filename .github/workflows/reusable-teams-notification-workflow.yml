@@ -1,0 +1,24 @@
+name: Reusable Teams Notification Workflow
+
+on:
+  workflow_call:
+    inputs:
+      payload:
+        description: Teams MessageCard JSON payload
+        required: true
+        type: string
+
+    secrets:
+      TEAMS_WEBHOOK_URL:
+        required: true
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Send Teams Notification
+        run: |
+          curl -X POST "${{ secrets.TEAMS_WEBHOOK_URL }}" \
+            -H "Content-Type: application/json" \
+            -d '${{ inputs.payload }}'
