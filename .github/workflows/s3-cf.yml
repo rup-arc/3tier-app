@@ -1,0 +1,138 @@
+name: Deploy S3 CloudFront
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Build Application
+        run: npm run build
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-files
+          path: dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: build-files
+          path: dist
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: Deploy to S3
+        run: |
+          aws s3 sync dist s3://${{ secrets.S3_BUCKET }} --delete
+
+      - name: CloudFront Invalidation
+        run: |
+          aws cloudfront create-invalidation \
+          --distribution-id ${{ secrets.CLOUDFRONT_DISTRIBUTION_ID }} \
+          --paths "/*"
+
+  notify-success:
+    needs: deploy
+    if: ${{ always() && needs.deploy.result == 'success' }}
+
+    uses: ./.github/workflows/reusable-teams-notification-workflow.yml
+
+    with:
+      payload: |
+        {
+          "@type": "MessageCard",
+          "@context": "https://schema.org/extensions",
+          "themeColor": "00FF00",
+          "summary": "S3 CloudFront Deployment Success",
+          "sections": [
+            {
+              "activityTitle": "✅ Deployment Successful",
+              "facts": [
+                { "name": "Repository", "value": "${{ github.repository }}" },
+                { "name": "Branch", "value": "${{ github.ref_name }}" },
+                { "name": "Environment", "value": "Production" },
+                { "name": "Triggered By", "value": "${{ github.actor }}" },
+                { "name": "Commit", "value": "${{ github.sha }}" }
+              ],
+              "markdown": true
+            },
+            {
+              "activityTitle": "Deployment Details",
+              "facts": [
+                { "name": "Target", "value": "AWS S3 + CloudFront" },
+                { "name": "Distribution", "value": "${{ secrets.CLOUDFRONT_DISTRIBUTION_ID }}" }
+              ],
+              "markdown": true
+            }
+          ]
+        }
+
+    secrets:
+      TEAMS_WEBHOOK_URL: ${{ secrets.TEAMS_WEBHOOK_URL }}
+
+  notify-failure:
+    needs: deploy
+    if: ${{ always() && needs.deploy.result == 'failure' }}
+
+    uses: ./.github/workflows/reusable-teams-notification-workflow.yml
+
+    with:
+      payload: |
+        {
+          "@type": "MessageCard",
+          "@context": "https://schema.org/extensions",
+          "themeColor": "FF0000",
+          "summary": "S3 CloudFront Deployment Failed",
+          "title": "❌ Deployment Failed",
+          "sections": [
+            {
+              "activityTitle": "Deployment failed",
+              "facts": [
+                { "name": "Repository", "value": "${{ github.repository }}" },
+                { "name": "Branch", "value": "${{ github.ref_name }}" },
+                { "name": "Environment", "value": "Production" },
+                { "name": "Triggered By", "value": "${{ github.actor }}" },
+                { "name": "Commit", "value": "${{ github.sha }}" }
+              ],
+              "markdown": true
+            },
+            {
+              "activityTitle": "Workflow Link",
+              "text": "[Open GitHub Actions Run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})",
+              "markdown": true
+            }
+          ]
+        }
+
+    secrets:
+      TEAMS_WEBHOOK_URL: ${{ secrets.TEAMS_WEBHOOK_URL }}
